@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--   Manifest-file for Ramdisk, put this file in 
+       /var/svc/manifest/system/ramdisk.xml
+       and run #svccfg import /var/svc/manifest/system/ramdisk.xml
+       Written by Yuri Voinov (C) 2007,2020
+-->
+<service_bundle type='manifest' name='Ramdisk'>
+
+<service
+        name='system/filesystem/ramdisk'
+        type='service'
+        version='1'>
+
+	<create_default_instance enabled='false' />
+
+        <single_instance />
+
+	<dependency
+		name='usr'
+		type='service'
+		grouping='require_all'
+		restart_on='none'>
+		<service_fmri value='svc:/system/filesystem/local' />
+	</dependency>
+
+        <dependency name='ramdisk-config'
+                grouping='require_all'
+                restart_on='refresh'
+                type='path'>
+                <service_fmri value='file://localhost/etc/ram.conf' />
+        </dependency>
+
+        <exec_method
+                type='method'
+                name='start'
+                exec='/lib/svc/method/ramdisk %m'
+                timeout_seconds='900' />
+
+        <exec_method
+                type='method'
+                name='stop'
+                exec='/lib/svc/method/ramdisk %m'
+                timeout_seconds='900' />
+
+	<property_group name='startd' type='framework'>
+		<propval name='duration' type='astring' value='transient' />
+	</property_group>
+
+
+        <stability value='Unstable' />
+
+        <template>
+                <common_name>
+                        <loctext xml:lang='C'>
+                        Ramdisk
+                        </loctext>
+                </common_name>
+		<description>
+			<loctext xml:lang='C'>
+            			This service uses for ramdisk creation.
+			</loctext>
+		</description>
+		<documentation>
+			<manpage title='ramdiskadm' section='1M' manpath='/usr/share/man' />
+		</documentation>
+        </template>
+
+</service>
+
+</service_bundle>

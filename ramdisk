@@ -1,0 +1,510 @@
+#!/sbin/sh
+
+#
+# Solaris 10 ramdisk(s) init script
+# for use with SMF.
+#
+# Version 2.0
+#
+# Copyright (C) 2009,2020 Y.Voinov
+#
+# ident "@(#)ramdisk.sh    2.0    03/09/20 YV"
+#
+# 10.02.2018 - Added UFS options. Added backup/restore functions.
+# 15.06.2009 - Fix minor bug with ramdisk without FS
+#              restore and especially backup.
+#
+
+#############
+# Variables #
+#############
+
+# Config dir
+CONFIG_DIR="/etc"
+
+# Ramdisk SMF config file
+CONFIG_FILE="$CONFIG_DIR/ram.conf"
+
+# OS utilities  
+AWK=`which awk`
+CPIO=`which cpio`
+CUT=`which cut`
+DATE=`which date`
+ECHO=`which echo`
+FIND=`which find`
+GREP=`which grep`
+LS=`which ls`
+MKDIR=`which mkdir`
+MOUNT=`which mount`
+NEWFS=`which newfs`
+RAMDISKADM=`which ramdiskadm`
+RM=`which rm`
+UMOUNT=`which umount`
+ZFS=`which zfs`
+ZPOOL=`which zpool`
+
+# FS options
+UFS_OPTS="-o forcedirectio,noatime"
+ZFS_OPTS="atime=off"
+
+###############
+# Subroutines #
+###############
+
+check_ramdiskadm ()
+{
+ err_msg="ERROR: Ramdiskadm utility not found or not executable."
+ # Check ramdiskadm exists and executable
+ if [ ! -f "$RAMDISKADM" -o ! -x "$RAMDISKADM" ]; then
+  $ECHO $err_msg
+  $ECHO $err_msg >> $RAMDISK_LOG
+  exit 1
+ fi
+}
+
+get_ramdisk_full_name ()
+{
+ # Get full ramdisk name
+ full_ramdisk_name=`$RAMDISKADM | $GREP $RAMDISK_NAME | $AWK '{ print $1 }'`
+ $ECHO "$full_ramdisk_name"
+}
+
+ramdisk_exists ()
+{
+ # Check ramdisk exists
+ if [ -z "`$RAMDISKADM | $GREP $RAMDISK_NAME`" ]; then
+  $ECHO "0"
+ else
+  $ECHO "1"
+ fi
+}
+
+mountpoint_exists ()
+{
+ # Check mountpoint exists
+ if [ -d "$RAMDISK_MOUNT" ]; then
+  $ECHO "1"
+ else
+  $ECHO "0"
+ fi
+}
+
+create_mountpoint ()
+{
+ warn_msg="WARNING: Mountpoint $RAMDISK_MOUNT already exists."
+ # Mountpoint creation
+ if [ "`mountpoint_exists`" = "0" ]; then
+  $MKDIR -p $RAMDISK_MOUNT
+ else
+  $ECHO $warn_msg
+  $ECHO $warn_msg >> $RAMDISK_LOG
+ fi
+}
+
+remove_mountpoint ()
+{
+ warn_msg="WARNING: Mountpoint $RAMDISK_MOUNT not exists."
+ # Mountpoint remove
+ if [ "`mountpoint_exists`" = "1" ]; then
+  $RM -Rf $RAMDISK_MOUNT
+ else
+  $ECHO $warn_msg
+  $ECHO $warn_msg >> $RAMDISK_LOG
+ fi
+}
+
+ramdisk_empty ()
+{
+ # Get ramdisk usage (find any file)
+ ramdisk_usage=`$LS -A $RAMDISK_MOUNT | $GREP -v "lost+found"`
+ if [ "x$ramdisk_usage" = "x" ]; then
+  $ECHO "1"
+ else
+  $ECHO "0"
+ fi
+}
+
+backup_dir_exists ()
+{
+ # Check backup directory exists
+ if [ -d "$RAMDISK_BACKUP_DIR" ]; then
+  $ECHO "1"
+ else
+  $ECHO "0"
+ fi
+}
+
+create_backup_dir ()
+{
+ warn_msg="WARNING: Backup directory $RAMDISK_BACKUP_DIR already exists."
+ # Mountpoint creation
+ if [ "`backup_dir_exists`" = "0" ]; then
+  $MKDIR -p $RAMDISK_BACKUP_DIR
+ else
+  $ECHO $warn_msg
+  $ECHO $warn_msg >> $RAMDISK_LOG
+ fi
+}
+
+backup_dir_empty ()
+{
+ # Get backup directory usage
+ backup_dir_usage=`$LS -A $RAMDISK_BACKUP_DIR | $GREP -v "lost+found"`
+ if [ "x$backup_dir_usage" = "x" ]; then
+  $ECHO "1"
+ else
+  $ECHO "0"
+ fi
+}
+
+backup_ramdisk ()
+{
+ ok_msg="BACKUP: Backup ramdisk $RAMDISK_NAME successfully completed to $RAMDISK_BACKUP_DIR."
+ err_msg="ERROR: Backup $RAMDISK_NAME. cannot be done. All contents of ramdisk will be lost."
+ info_msg="BACKUP: Ramdisk is empty."
+ create_backup_dir
+ # Now backup ramdisk if it non-empty
+ if [ "`ramdisk_empty`" = "0" ]; then
+  if [ "$RAMDISK_BACKUP_OVERWRITE" = "1" ]; then
+   cd "$RAMDISK_BACKUP_DIR" && $RM -Rf *>/dev/null 2>&1
+  fi
+  cd "$RAMDISK_MOUNT" && $FIND . -print | $CPIO -pdum "$RAMDISK_BACKUP_DIR">/dev/null 2>&1
+  retcode=`$ECHO $?`
+  case "$retcode" in
+   0)
+    $ECHO $ok_msg
+    $ECHO $ok_msg >> $RAMDISK_LOG
+   ;;
+   *)
+    $ECHO $err_msg
+    $ECHO $err_msg >> $RAMDISK_LOG
+    exit 1
+   ;;
+  esac
+ else
+  $ECHO $info_msg
+  $ECHO $info_msg >> $RAMDISK_LOG
+ fi
+}
+
+restore_ramdisk ()
+{
+ ok_msg="BACKUP: Ramdisk $RAMDISK_NAME successfully restored from $RAMDISK_BACKUP_DIR."
+ err_msg="ERROR: Backup $RAMDISK_NAME. cannot be restored. Ramdisk is empty."
+ info_msg="BACKUP: Backup directory $RAMDISK_BACKUP_DIR is empty or not exists. Ramdisk is empty."
+ # Now restore ramdisk if backup directory non-empty
+ if [ "`backup_dir_exists`" = "1" -a "`backup_dir_empty`" = "0" ]; then
+  cd "$RAMDISK_BACKUP_DIR" && $FIND . -print | $CPIO -pdum "$RAMDISK_MOUNT">/dev/null 2>&1
+  retcode=`$ECHO $?`
+  case "$retcode" in
+   0)
+    $ECHO $ok_msg
+    $ECHO $ok_msg >> $RAMDISK_LOG
+   ;;
+   *)
+    $ECHO $err_msg
+    $ECHO $err_msg >> $RAMDISK_LOG
+    exit 1
+   ;;
+  esac
+ else
+  $ECHO $info_msg
+  $ECHO $info_msg >> $RAMDISK_LOG
+ fi
+}
+
+create_ufs_filesystem ()
+{
+ ok_msg="UFS created on ramdisk $RAMDISK_NAME successfully."
+ err_msg="ERROR: Cannot create UFS on $RAMDISK_NAME."
+ # Create UFS filesystem on ramdisk
+ $ECHO "y" | $NEWFS "`get_ramdisk_full_name`">/dev/null 2>&1
+ retcode=`$ECHO $?`
+ case "$retcode" in
+  0)
+   $ECHO $ok_msg
+   $ECHO $ok_msg >> $RAMDISK_LOG
+  ;;
+  *)
+   $ECHO $err_msg
+   $ECHO $err_msg >> $RAMDISK_LOG
+   #exit 1 # No err, if fs exists, just warn
+  ;;
+ esac
+}
+
+mount_ufs_ramdisk ()
+{
+ ok_msg="Ramdisk $RAMDISK_NAME mounted on $RAMDISK_MOUNT."
+ err_msg="ERROR: Cannot mount ramdisk on $RAMDISK_MOUNT."
+ # Mount UFS-formatted ramdisk
+ ramdisk_full_name="`get_ramdisk_full_name`"
+ # First create mountpoint if not already exists
+ create_mountpoint
+ # Second mount formatted ramdisk to mountpoint
+ $MOUNT $UFS_OPTS $ramdisk_full_name $RAMDISK_MOUNT>/dev/null 2>&1
+ retcode=`$ECHO $?`
+ case "$retcode" in
+  0)
+   $ECHO $ok_msg
+   $ECHO $ok_msg >> $RAMDISK_LOG
+  ;;
+  *)
+   $ECHO $err_msg
+   $ECHO $err_msg >> $RAMDISK_LOG
+   exit 1
+  ;;
+ esac
+}
+
+umount_ufs_ramdisk ()
+{
+ ok_msg="Ramdisk $RAMDISK_NAME umounted."
+ err_msg="ERROR: Cannot umount ramdisk."
+ # Umount UFS-formatted ramdisk
+ $UMOUNT -f $RAMDISK_MOUNT>/dev/null 2>&1
+ retcode=`$ECHO $?`
+ case "$retcode" in
+  0)
+   $ECHO $ok_msg
+   $ECHO $ok_msg >> $RAMDISK_LOG
+  ;;
+  *)
+   $ECHO $err_msg
+   $ECHO $err_msg >> $RAMDISK_LOG
+   exit 1
+  ;;
+ esac
+}
+
+create_zfs_filesystem ()
+{
+ # Create ZFS storage pool on ramdisk
+ ok_msg="ZFS pool $RAMDISK_ZPOOL_NAME created on ramdisk $RAMDISK_NAME successfully."
+ err_msg="ERROR: Cannot create ZFS pool $RAMDISK_ZPOOL_NAME on $RAMDISK_NAME."
+ # First remove mountpoint for pool if it exists
+ remove_mountpoint
+ $ZPOOL create -f -m $RAMDISK_MOUNT $RAMDISK_ZPOOL_NAME "`get_ramdisk_full_name`"
+ retcode=`$ECHO $?`
+ case "$retcode" in
+  0)
+   $ECHO $ok_msg
+   $ECHO $ok_msg >> $RAMDISK_LOG
+  ;;
+  *)
+   $ECHO $err_msg
+   $ECHO $err_msg >> $RAMDISK_LOG
+   exit 1
+  ;;
+ esac
+ # Set performance/storage/redundancy fs/pool properties if it defined
+ # Set default ZFS opts
+ $ZFS set $ZFS_OPTS $RAMDISK_ZPOOL_NAME
+ # Set property 1
+ if [ ! -z "$RAMDISK_ZFS_PROPERTY1" ]; then
+  $ZFS set $RAMDISK_ZFS_PROPERTY1 $RAMDISK_ZPOOL_NAME
+ fi
+ # Set property 2
+ if [ ! -z "$RAMDISK_ZFS_PROPERTY2" ]; then
+  $ZFS set $RAMDISK_ZFS_PROPERTY2 $RAMDISK_ZPOOL_NAME
+ fi
+ # Set property 3
+ if [ ! -z "$RAMDISK_ZFS_PROPERTY3" ]; then
+  $ZFS set $RAMDISK_ZFS_PROPERTY3 $RAMDISK_ZPOOL_NAME
+ fi
+ # Set property 4
+ if [ ! -z "$RAMDISK_ZPOOL_PROPERTY4" ]; then
+  $ZPOOL set $RAMDISK_ZPOOL_PROPERTY4 $RAMDISK_ZPOOL_NAME
+ fi
+}
+
+destroy_zfs_filesystem ()
+{
+ # Destroy ZFS storage pool on ramdisk
+ ok_msg="ZFS pool $RAMDISK_ZPOOL_NAME on ramdisk $RAMDISK_NAME destroyed successfully."
+ err_msg="ERROR: Cannot destroy ZFS pool $RAMDISK_ZPOOL_NAME on $RAMDISK_NAME."
+ $ZPOOL destroy -f $RAMDISK_ZPOOL_NAME
+ retcode=`$ECHO $?`
+ case "$retcode" in
+  0)
+   $ECHO $ok_msg
+   $ECHO $ok_msg >> $RAMDISK_LOG
+  ;;
+  *)
+   $ECHO $err_msg
+   $ECHO $err_msg >> $RAMDISK_LOG
+   exit 1
+  ;;
+ esac
+}
+
+create_ramdisk ()
+{
+ ok_msg="Ramdisk $RAMDISK_NAME $RAMDISK_SIZE created successfully."
+ err_msg1="WARNING: Ramdisk $RAMDISK_NAME already exists."
+ err_msg2="ERROR: Cannot create $RAMDISK_NAME."
+ err_msg3="ERROR: Cannot create filesystem $RAMDISK_FS on $RAMDISK_NAME."
+ start_msg1="RAMDISK: Starting ramdisk at `$DATE` ..."
+ start_msg2="RAMDISK: Started at `$DATE`."
+ # Create specified ramdisk
+ $ECHO $start_msg1
+ $ECHO $start_msg1 >> $RAMDISK_LOG
+ if [ "`ramdisk_exists`" = "0" ]; then
+  $RAMDISKADM -a $RAMDISK_NAME $RAMDISK_SIZE>/dev/null 2>&1
+  retcode=`$ECHO $?`
+  case "$retcode" in
+   0)
+    $ECHO $ok_msg
+    $ECHO $ok_msg >> $RAMDISK_LOG
+   ;;
+   *)
+    $ECHO $err_msg2
+    $ECHO $err_msg2 >> $RAMDISK_LOG
+   ;;
+  esac
+ else
+  $ECHO $err_msg1
+  $ECHO $err_msg1 >> $RAMDISK_LOG
+  #exit 1 # Ramdisk exists - it's not an error, just warn
+ fi
+ # If FS specified, create filesystem
+ if [ ! -z "$RAMDISK_FS" ]; then
+  case $RAMDISK_FS in
+   ufs)
+    create_ufs_filesystem
+    if [ ! -z "$RAMDISK_MOUNT" ]; then
+     mount_ufs_ramdisk
+    fi
+   ;;
+   zfs)
+    create_zfs_filesystem
+   ;;
+   none)
+    # No filesystem and no mount
+   ;;
+   *)
+    $ECHO $err_msg3
+    $ECHO $err_msg3 >> $RAMDISK_LOG
+   ;;
+  esac
+ fi
+ # If backup dir specifies, make ramdisk restore
+ if [ ! -z "$RAMDISK_BACKUP_DIR" -a "$RAMDISK_FS" != "none" ]; then
+  restore_ramdisk
+ fi
+ $ECHO $start_msg2
+ $ECHO $start_msg2 >> $RAMDISK_LOG
+}
+
+remove_ramdisk ()
+{
+ ok_msg="Ramdisk $RAMDISK_NAME $RAMDISK_SIZE removed successfully."
+ err_msg1="ERROR: Ramdisk $RAMDISK_NAME does not exists."
+ err_msg2="ERROR: Cannot remove $RAMDISK_NAME."
+ stop_msg1="RAMDISK: Stopping ramdisk at `$DATE` ..."
+ stop_msg2="RAMDISK: Stopped at `$DATE`."
+ $ECHO $stop_msg1
+ $ECHO $stop_msg1 >> $RAMDISK_LOG
+ # If backup dir specifies, and ramdisk with FS,
+ # make ramdisk backup 
+ if [ ! -z "$RAMDISK_BACKUP_DIR" -a "$RAMDISK_FS" != "none" ]; then
+  backup_ramdisk
+ fi
+ # If FS specified, umount filesystem
+ if [ ! -z "$RAMDISK_FS" ]; then
+  case $RAMDISK_FS in
+   ufs)
+    if [ ! -z "$RAMDISK_MOUNT" ]; then
+     umount_ufs_ramdisk
+    fi
+   ;;
+   zfs)
+    destroy_zfs_filesystem
+   ;;
+   none)
+    # No filesystem and no mount
+   ;;
+  esac
+ fi
+ # Then remove ramdisk
+ if [ "`ramdisk_exists`" = "1" ]; then
+  $RAMDISKADM -d $RAMDISK_NAME>/dev/null 2>&1
+  retcode=`$ECHO $?`
+  case "$retcode" in
+   0)
+    $ECHO $ok_msg
+    $ECHO $ok_msg >> $RAMDISK_LOG
+   ;;
+   *)
+    $ECHO $err_msg2
+    $ECHO $err_msg2 >> $RAMDISK_LOG
+   ;;
+  esac
+ else
+  $ECHO $err_msg1
+  $ECHO $err_msg1 >> $RAMDISK_LOG
+  exit 1
+ fi
+ $ECHO $stop_msg2
+ $ECHO $stop_msg2 >> $RAMDISK_LOG
+}
+
+get_params_from_config_and_execute_cmd ()
+{
+ # Get ramdisk params from config then
+ # processing params with specified subroutine
+ v_cmd=$1 # Get command from arg
+ 
+ while read v_param
+  do
+   # If row commented or empty line, skip it
+   if [ "`$ECHO $v_param | $CUT -b 1`" = "#" -o -z "`$ECHO $v_param | $CUT -b 1`" ]; then
+    continue
+   fi
+   # Get ramdisk properties from config
+   RAMDISK_NAME="`$ECHO $v_param | $CUT -f1 -d':'`"
+   RAMDISK_SIZE="`$ECHO $v_param | $CUT -f2 -d':'`"
+   RAMDISK_FS="`$ECHO $v_param | $CUT -f3 -d':'`"
+   RAMDISK_ZPOOL_NAME="`$ECHO $v_param | $CUT -f4 -d':'`"
+   RAMDISK_ZFS_PROPERTY1="`$ECHO $v_param | $CUT -f5 -d':'`"
+   RAMDISK_ZFS_PROPERTY2="`$ECHO $v_param | $CUT -f6 -d':'`"
+   RAMDISK_ZFS_PROPERTY3="`$ECHO $v_param | $CUT -f7 -d':'`"
+   RAMDISK_ZPOOL_PROPERTY4="`$ECHO $v_param | $CUT -f8 -d':'`"
+   RAMDISK_MOUNT="`$ECHO $v_param | $CUT -f9 -d':'`"
+   RAMDISK_BACKUP_DIR="`$ECHO $v_param | $CUT -f10 -d':'`"
+   RAMDISK_BACKUP_OVERWRITE="`$ECHO $v_param | $CUT -f11 -d':'`"
+   RAMDISK_LOG="`$ECHO $v_param | $CUT -f12 -d':'`"
+   # Execute command with parameters
+   $v_cmd
+  done < $CONFIG_FILE
+}
+
+##############
+# Main block #
+##############
+
+# First check ramdiskadm utility
+check_ramdiskadm
+
+# Now execute method commands
+case "$1" in
+ start)
+  get_params_from_config_and_execute_cmd create_ramdisk
+ ;;
+ stop)
+  get_params_from_config_and_execute_cmd remove_ramdisk
+ ;;
+ backup)
+  get_params_from_config_and_execute_cmd backup_ramdisk
+ ;;
+ restore)
+  get_params_from_config_and_execute_cmd restore_ramdisk
+ ;;
+ *)
+  $ECHO "Usage $0 <start|stop|backup|restore>"
+  exit 1
+ ;;
+esac
+
+exit 0
+#####
