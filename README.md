@@ -1,5 +1,5 @@
 # Solaris ramdisk SMF
-[![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://github.com/yvoinov/ramdisk_smf/blob/master/LICENSE)
 
                       ***************
                       * Version 2.0 *
